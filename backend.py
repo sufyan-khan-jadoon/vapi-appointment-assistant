@@ -392,5 +392,81 @@ def list_appointments(date: dt.date = Query(...), db: Session = Depends(get_db))
     return booked_appointments
 
 import uvicorn
+import uvicorn
+import httpx
+import os
+
+# WhatsApp Cloud API credentials (to be set in environment variables)
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+DOCTOR_WHATSAPP_NUMBER = "+923280434199"
+
+async def send_whatsapp_message(to_number: str, message: str):
+    """Sends a WhatsApp message using the Official Meta Cloud API."""
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        print("WhatsApp credentials not set. Message not sent.")
+        return False
+    
+    url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    
+    # Cleaning phone number
+    to_number = "".join(filter(str.isdigit, to_number))
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "text",
+        "text": {"body": message},
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"Failed to send WhatsApp message: {e}")
+            return False
+
+@app.post("/trigger_daily_report/")
+async def trigger_daily_report(db: Session = Depends(get_db)):
+    """
+    Endpoint to be called by a scheduler (like cron-job.org) at 12:00 AM.
+    It fetches appointments for 'today' and sends them to the doctor.
+    """
+    today_str = dt.date.today().isoformat()
+    
+    result = db.execute(
+        select(Appointment)
+        .where(Appointment.canceled == False)
+        .where(Appointment.date == today_str)
+        .order_by(Appointment.token_number.asc())
+    )
+    appointments = result.scalars().all()
+    
+    if not appointments:
+        message = f"📅 *Daily Report: {today_str}*\nNo appointments scheduled for today."
+    else:
+        message = f"📅 *Daily Report: {today_str}*\nYou have {len(appointments)} patients scheduled:\n\n"
+        for appt in appointments:
+            message += f"#{appt.token_number}: {appt.patient_name} ({appt.patient_phone})\n"
+            message += f"   Purpose: {appt.purpose}\n"
+            if appt.patient_age:
+                message += f"   Age: {appt.patient_age} | {appt.patient_gender or 'N/A'}\n"
+            message += "---\n"
+
+    success = await send_whatsapp_message(DOCTOR_WHATSAPP_NUMBER, message)
+    
+    return {
+        "status": "success" if success else "failed",
+        "date": today_str,
+        "appointment_count": len(appointments),
+        "whatsapp_sent": success
+    }
+
 if __name__ == "__main__":
     uvicorn.run("backend:app", host="0.0.0.0", port=4444, reload=True)
